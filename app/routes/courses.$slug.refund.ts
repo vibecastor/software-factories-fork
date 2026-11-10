@@ -30,7 +30,7 @@ const refundActionSchema = z.object({
   reason: z
     .string()
     .trim()
-    .min(10, "Tell us a little more about why you want to cancel.")
+    .min(10, "Tell us a little more about why you'd like a refund.")
     .max(1000, "Please keep your reason under 1000 characters."),
 });
 
@@ -86,25 +86,25 @@ function lastDayOfWindow(purchasedAtIso: string): string {
 }
 
 /**
- * The confirmation the learner gets in their inbox. There is no mail
+ * The confirmation the buyer gets in their inbox. There is no mail
  * transport wired up yet, so the built message goes to the server log.
  */
-function buildReversalEmail(input: {
-  learnerName: string;
-  learnerEmail: string;
+function buildRefundRequestedEmail(input: {
+  buyerName: string;
+  buyerEmail: string;
   courseTitle: string;
   amount: number;
 }) {
   return {
-    to: input.learnerEmail,
-    subject: `Reversal requested — ${input.courseTitle}`,
+    to: input.buyerEmail,
+    subject: `Refund requested — ${input.courseTitle}`,
     body: [
-      `Hi ${input.learnerName},`,
+      `Hi ${input.buyerName},`,
       "",
-      `We have your Reversal request for "${input.courseTitle}".`,
-      `The Reversal is for ${formatPrice(input.amount)}, the amount you paid.`,
+      `We have your refund request for "${input.courseTitle}".`,
+      `It is for ${formatPrice(input.amount)}, the amount you paid.`,
       "",
-      "Our team reviews every Reversal by hand. You do not need to do anything else — we will email you again when it is done.",
+      "Our team reviews every refund request by hand. You do not need to do anything else — we'll email you once we've made a decision.",
       "",
       "— The Cadence team",
     ].join("\n"),
@@ -115,7 +115,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
-    throw data("You must be logged in to cancel a purchase.", { status: 401 });
+    throw data("You must be logged in to request a refund.", { status: 401 });
   }
 
   const { slug } = parseParams(params, refundParamsSchema);
@@ -125,13 +125,13 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("Course not found", { status: 404 });
   }
 
-  const learner = db
+  const buyer = db
     .select()
     .from(users)
     .where(eq(users.id, currentUserId))
     .get();
 
-  if (!learner) {
+  if (!buyer) {
     throw data("User not found", { status: 404 });
   }
 
@@ -142,13 +142,13 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   if (getOpenRefund(purchase.id)) {
-    throw data("You already have a request open on this purchase.", {
+    throw data("You've already requested a refund for this purchase.", {
       status: 409,
     });
   }
 
   // A seat that came out of a team licence, and has been claimed, belongs to
-  // the team — the learner cannot hand it back on their own.
+  // the team — the Purchase stops being Refundable.
   const claimedSeat = db
     .select({ id: coupons.id })
     .from(coupons)
@@ -158,14 +158,17 @@ export async function action({ params, request }: Route.ActionArgs) {
     .get();
 
   if (claimedSeat) {
-    throw data("A claimed team seat cannot be cancelled.", { status: 403 });
+    throw data(
+      "This purchase can't be refunded because a team seat has already been claimed.",
+      { status: 403 }
+    );
   }
 
   const today = calendarDay(new Date());
   const withinRefundWindow = today <= lastDayOfWindow(purchase.createdAt);
 
   if (!withinRefundWindow) {
-    throw data(`The ${REFUND_WINDOW_DAYS}-day window has closed.`, {
+    throw data(`The ${REFUND_WINDOW_DAYS}-day refund window has closed.`, {
       status: 403,
     });
   }
@@ -195,12 +198,12 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   if (watchedSeconds >= MAX_WATCHED_HOURS * 60 * 60) {
-    throw data("You have watched too much of this course to cancel it.", {
+    throw data("You've watched too much of this course to request a refund.", {
       status: 403,
     });
   }
 
-  // A purchase made at a purchasing-power price is given back at that price,
+  // A purchase made at a purchasing-power price is refunded at that price,
   // not at the list price of the course.
   const pppDiscount = getDiscountForCountry(purchase.country);
   const refundableAmount = pppDiscount > 0 ? purchase.amountPaid : course.price;
@@ -212,8 +215,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     return data({ errors: parsed.errors }, { status: 400 });
   }
 
-  db
-    .insert(refunds)
+  db.insert(refunds)
     .values({
       purchaseId: purchase.id,
       status: RefundStatus.Requested,
@@ -222,16 +224,14 @@ export async function action({ params, request }: Route.ActionArgs) {
     .returning()
     .get();
 
-  const email = buildReversalEmail({
-    learnerName: learner.name,
-    learnerEmail: learner.email,
+  const email = buildRefundRequestedEmail({
+    buyerName: buyer.name,
+    buyerEmail: buyer.email,
     courseTitle: course.title,
     amount: refundableAmount,
   });
 
-  console.log(
-    `[email] to=${email.to} subject=${email.subject}\n${email.body}`
-  );
+  console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
 
   return redirect("/settings");
 }
